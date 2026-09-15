@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Cave Diver — LaunchTower</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --accent: #58a6ff;
+    --text: #c9d1d9;
+    --dim: #8b949e;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 10px;
+    padding: 10px;
+  }
+  #hud {
+    display: flex;
+    gap: 24px;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    user-select: none;
+  }
+  #hud span { color: var(--dim); font-weight: 400; }
+  #hud b { color: var(--accent); }
+  canvas {
+    background: #0a0e14;
+    border: 1px solid #21262d;
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    max-width: 100%;
+    max-height: calc(100vh - 120px);
+    cursor: pointer;
+  }
+  #footer {
+    font-size: 12px;
+    color: var(--dim);
+    user-select: none;
+  }
+  #footer a { color: var(--accent); text-decoration: none; }
+  #footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div><span>SCORE </span><b id="score">0</b></div>
+    <div><span>BEST </span><b id="best">0</b></div>
+  </div>
+  <canvas id="game"></canvas>
+  <div id="footer">Built by <a href="https://pennypenguinapp-beep.github.io/" target="_blank" rel="noopener">LaunchTower</a></div>
+</div>
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+
+  // ---- Sizing ----
+  let W = 480, H = 640;
+  function resize() {
+    const maxW = Math.min(window.innerWidth - 20, 520);
+    const maxH = Math.min(window.innerHeight - 130, 720);
+    const aspect = 3 / 4;
+    W = Math.floor(Math.min(maxW, maxH * aspect));
+    H = Math.floor(W / aspect);
+    W = Math.max(W, 300);
+    H = Math.max(H, 400);
+    canvas.width = W;
+    canvas.height = H;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ---- State ----
+  const STATE = { READY: 0, PLAYING: 1, DEAD: 2 };
+  let state = STATE.READY;
+  let score = 0;
+  let best = parseInt(localStorage.getItem('cavediver_best') || '0', 10);
+  bestEl.textContent = best;
+
+  // Player
+  const player = {
+    x: 0, y: 0, vy: 0, r: 10,
+    thrust: false,
+    trail: []
+  };
+
+  // Cave generation
+  const COL_W = 14;          // width of each cave column in px
+  const GAP_MIN = 90;        // min gap height
+  const GAP_RAMP = 0.995;    // gap shrinks per column
+  let cols = [];             // { x, top, bot }
+  let scrollSpeed = 2.2;
+  let nextColX = 0;
+  let frame = 0;
+
+  // Particles
+  let particles = [];
+
+  // Background stars (parallax)
+  let stars = [];
+  function initStars() {
+    stars = [];
+    for (let i = 0; i < 60; i++) {
+      stars.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        s: Math.random() * 1.5 + 0.5,
+        sp: Math.random() * 0.3 + 0.1
+      });
+    }
+  }
+  initStars();
+
+  // ---- Cave column generation ----
+  function gapFor(colIndex) {
+    return Math.max(55, GAP_MIN * Math.pow(GAP_RAMP, colIndex));
+  }
+
+  function makeCol(x, colIndex) {
+    const gap = gapFor(colIndex);
+    const margin = 20;
+    const minY = margin + gap / 2;
+    const maxY = H - margin - gap / 2;
+    const cy = minY + Math.random() * (maxY - minY);
+    return {
+      x: x,
+      top: cy - gap / 2,
+      bot: cy + gap / 2,
+      passed: false
+    };
+  }
+
+  function resetGame() {
+    player.x = W * 0.25;
+    player.y = H / 2;
+    player.vy = 0;
+    player.thrust = false;
+    player.trail = [];
+    cols = [];
+    particles = [];
+    score = 0;
+    scoreEl.textContent = '0';
+    scrollSpeed = 2.2;
+    frame = 0;
+    nextColX = W + COL_W;
+    // Pre-fill columns
+    for (let i = 0; i < Math.ceil(W / COL_W) + 6; i++) {
+      cols.push(makeCol(W + COL_W * i, i));
+    }
+    nextColX = W + COL_W * (Math.ceil(W / COL_W) + 6);
+  }
+  resetGame();
+
+  // ---- Particles ----
+  function spawnParticles(x, y, n, color, spread, life) {
+    for (let i = 0; i < n; i++) {
+      particles.push({
+        x: x + (Math.random() - 0.5) * spread,
+        y: y + (Math.random() - 0.5) * spread,
+        vx: (Math.random() - 0.5) * 3,
+        vy: (Math.random() - 0.5) * 3,
+        life: life + Math.random() * life * 0.5,
+        maxLife: life + Math.random() * life * 0.5,
+        color: color,
+        size: Math.random() * 3 + 1
+      });
+    }
+  }
+
+  function updateParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.05;
+      p.life -= 1;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+  }
+
+  function drawParticles() {
+    for (const p of particles) {
+      const a = Math.max(0, p.life / p.maxLife);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Input ----
+  function thrust() {
+    if (state === STATE.READY) {
+      state = STATE.PLAYING;
+    }
+    if (state === STATE.PLAYING) {
+      player.vy = -4.2;
+      player.thrust = true;
+      spawnParticles(player.x - 6, player.y + 4, 3, '#58a6ff', 6, 15);
+    }
+    if (state === STATE.DEAD) {
+      resetGame();
+      state = STATE.READY;
+    }
+  }
+
+  function releaseThrust() {
+    player.thrust = false;
+  }
+
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+      e.preventDefault();
+      thrust();
+    }
+  });
+  window.addEventListener('keyup', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+      releaseThrust();
+    }
+  });
+  canvas.addEventListener('pointerdown', e => { e.preventDefault(); thrust(); });
+  canvas.addEventListener('pointerup', e => { e.preventDefault(); releaseThrust(); });
+  canvas.addEventListener('pointercancel', releaseThrust);
+
+  // ---- Collision ----
+  function checkCollision() {
+    const px = player.x, py = player.y, pr = player.r;
+    // Ceiling / floor
+    if (py - pr < 0 || py + pr > H) return true;
+    // Columns
+    for (const c of cols) {
+      if (c.x + COL_W < px - pr || c.x > px + pr) continue;
+      if (py - pr < c.top || py + pr > c.bot) return true;
+    }
+    return false;
+  }
+
+  // ---- Update ----
+  function update() {
+    if (state === STATE.READY) {
+      // Idle bob
+      player.y = H / 2 + Math.sin(frame * 0.05) * 12;
+      frame++;
+      return;
+    }
+    if (state === STATE.DEAD) {
+      updateParticles();
+      return;
+    }
+
+    frame++;
+
+    // Physics
+    if (player.thrust) {
+      player.vy += 0.12;
+    } else {
+      player.vy += 0.28;
+    }
+    player.vy = Math.min(player.vy, 7);
+    player.y += player.vy;
+
+    // Trail
+    player.trail.push({ x: player.x, y: player.y, life: 20 });
+    if (player.trail.length > 20) player.trail.shift();
+    for (const t of player.trail) t.life--;
+
+    // Scroll
+    scrollSpeed = 2.2 + Math.min(score * 0.04, 3.5);
+    for (const c of cols) c.x -= scrollSpeed;
+
+    // Remove off-screen cols, add new
+    while (cols.length && cols[0].x + COL_W < -10) cols.shift();
+    while (nextColX - scrollSpeed * frame < W + COL_W * 2) {
+      // Add new column at the right edge
+      const lastX = cols.length ? cols[cols.length - 1].x + COL_W : W;
+      cols.push(makeCol(lastX, cols.length));
+    }
+
+    // Score
+    for (const c of cols) {
+      if (!c.passed && c.x + COL_W < player.x - player.r) {
+        c.passed = true;
+        score++;
+        scoreEl.textContent = score;
+        spawnParticles(player.x, player.y, 2, '#3fb950', 10, 12);
+      }
+    }
+
+    // Particles
+    updateParticles();
+
+    // Stars
+    for (const s of stars) {
+      s.x -= s.sp * scrollSpeed * 0.3;
+      if (s.x < 0) { s.x = W; s.y = Math.random() * H; }
+    }
+
+    // Collision
+    if (checkCollision()) {
+      state = STATE.DEAD;
+      if (score > best) {
+        best = score;
+        bestEl.textContent = best;
+        localStorage.setItem('cavediver_best', String(best));
+      }
+      spawnParticles(player.x, player.y, 30, '#f85149', 20, 30);
+      spawnParticles(player.x, player.y, 20, '#58a6ff', 15, 25);
+    }
+  }
+
+  // ---- Draw ----
+  function drawCave() {
+    // Top rock
+    ctx.fillStyle = '#1a2332';
+    for (const c of cols) {
+      if (c.x > W + COL_W) continue;
+      const x = Math.floor(c.x);
+      const w = COL_W;
+      // Top
+      ctx.fillRect(x, 0, w, Math.max(0, c.top));
+      // Bottom
+      ctx.fillRect(x, c.bot, w, Math.max(0, H - c.bot));
+    }
+
+    // Rock edge highlights
+    ctx.fillStyle = '#2d4a6a';
+    for (const c of cols) {
+      if (c.x > W + COL_W) continue;
+      const x = Math.floor(c.x);
+      // Top edge
+      if (c.top > 0) {
+        ctx.fillRect(x, c.top - 3, COL_W, 3);
+      }
+      // Bottom edge
+      ctx.fillRect(x, c.bot, COL_W, 3);
+    }
+
+    // Rock texture (subtle pixel noise)
+    ctx.fillStyle = '#141c28';
+    for (const c of cols) {
+      if (c.x > W + COL_W) continue;
+      const x = Math.floor(c.x);
+      // Top texture
+      for (let ty = 0; ty < c.top; ty += 8) {
+        if ((Math.floor(x / 4) + Math.floor(ty / 8)) % 3 === 0) {
+          ctx.fillRect(x + 2, ty + 2, 4, 4);
+        }
+      }
+      // Bottom texture
+      for (let by = c.bot; by < H; by += 8) {
+        if ((Math.floor(x / 4) + Math.floor(by / 8)) % 3 === 0) {
+          ctx.fillRect(x + 2, by + 2, 4, 4);
+        }
+      }
+    }
+  }
+
+  function drawPlayer() {
+    // Trail
+    for (let i = 0; i < player.trail.length; i++) {
+      const t = player.trail[i];
+      const a = (t.life / 20) * 0.3;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#58a6ff';
+      const s = 3 + (i / player.trail.length) * 4;
+      ctx.fillRect(t.x - s / 2, t.y - s / 2, s, s);
+    }
+    ctx.globalAlpha = 1;
+
+    // Body (pixel ship)
+    const px = Math.floor(player.x);
+    const py = Math.floor(player.y);
+    const r = player.r;
+
+    // Glow
+    ctx.fillStyle = 'rgba(88, 166, 255, 0.15)';
+    ctx.beginPath();
+    ctx.arc(px, py, r + 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Ship body
+    ctx.fillStyle = '#58a6ff';
+    ctx.fillRect(px - r, py - r * 0.6, r * 2, r * 1.2);
+    // Nose
+    ctx.fillStyle = '#79c0ff';
+    ctx.fillRect(px + r * 0.5, py - r * 0.4, r * 0.8, r * 0.8);
+    // Tail
+    ctx.fillStyle = '#1f6feb';
+    ctx.fillRect(px - r * 1.2, py - r * 0.3, r * 0.4, r * 0.6);
+    // Cockpit
+    ctx.fillStyle = '#e6edf3';
+    ctx.fillRect(px + r * 0.1, py - r * 0.25, r * 0.5, r * 0.5);
+    // Thruster flame
+    if (player.thrust && state === STATE.PLAYING) {
+      ctx.fillStyle = '#f0883e';
+      ctx.fillRect(px - r * 1.6, py - r * 0.2, r * 0.5, r * 0.4);
+      ctx.fillStyle = '#f85149';
+      ctx.fillRect(px - r * 1.8, py - r * 0.1, r * 0.3, r * 0.2);
+    }
+  }
+
+  function drawStars() {
+    for (const s of stars) {
+      ctx.globalAlpha = 0.3 + s.s * 0.2;
+      ctx.fillStyle = '#8b949e';
+      ctx.fillRect(Math.floor(s.x), Math.floor(s.y), s.s, s.s);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawOverlay() {
+    if (state === STATE.READY) {
+      ctx.fillStyle = 'rgba(13, 17, 23, 0.6)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#c9d1d9';
+      ctx.font = 'bold 28px "Segoe UI", system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('CAVE DIVER', W / 2, H / 2 - 40);
+      ctx.font = '15px "Segoe UI", system-ui, sans-serif';
+      ctx.fillStyle = '#8b949e';
+      ctx.fillText('Tap / Space / Click to thrust', W / 2, H / 2);
+      ctx.fillText('Navigate through the cave gaps', W / 2, H / 2 + 24);
+      ctx.fillStyle = '#58a6ff';
+      ctx.font = '13px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('— LaunchTower —', W / 2, H / 2 + 60);
+      ctx.textAlign = 'left';
+    }
+    if (state === STATE.DEAD) {
+      ctx.fillStyle = 'rgba(13, 17, 23, 0.7)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#f85149';
+      ctx.font = 'bold 32px "Segoe UI", system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('CAVE OUT', W / 2, H / 2 - 50);
+      ctx.fillStyle = '#c9d1d9';
+      ctx.font = '20px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('Score: ' + score, W / 2, H / 2 - 10);
+      if (score >= best && score > 0) {
+        ctx.fillStyle = '#3fb950';
+        ctx.font = 'bold 16px "Segoe UI", system-ui, sans-serif';
+        ctx.fillText('NEW BEST!', W / 2, H / 2 + 18);
+      }
+      ctx.fillStyle = '#8b949e';
+      ctx.font = '14px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('Tap / Space to retry', W / 2, H / 2 + 50);
+      ctx.fillStyle = '#58a6ff';
+      ctx.font = '12px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('— LaunchTower —', W / 2, H / 2 + 80);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  // ---- Main loop ----
+  function loop() {
+    update();
+    ctx.clearRect(0, 0, W, H);
+    drawStars();
+    drawCave();
+    drawParticles();
+    if (state !== STATE.DEAD) drawPlayer();
+    drawOverlay();
+    requestAnimationFrame(loop);
+  }
+  loop();
+})();
+</script>
+</body>
+</html>
