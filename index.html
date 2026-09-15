@@ -46,10 +46,25 @@
     border: 1px solid #21262d;
     border-radius: 8px;
     box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-    max-width: 100%;
-    max-height: calc(100vh - 120px);
     cursor: pointer;
+    touch-action: none;
   }
+  .btn {
+    display: inline-block;
+    margin-top: 18px;
+    padding: 14px 44px;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: #0d1117;
+    background: var(--accent);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    user-select: none;
+    box-shadow: 0 4px 16px rgba(88,166,255,0.4);
+  }
+  .btn:active { transform: translateY(1px); }
   #footer {
     font-size: 12px;
     color: var(--dim);
@@ -67,6 +82,7 @@
   </div>
   <canvas id="game"></canvas>
   <div id="footer">Built by <a href="https://pennypenguinapp-beep.github.io/" target="_blank" rel="noopener">LaunchTower</a></div>
+  <button id="playBtn" class="btn" style="display:none">PLAY</button>
 </div>
 <script>
 (() => {
@@ -77,24 +93,25 @@
   const scoreEl = document.getElementById('score');
   const bestEl = document.getElementById('best');
 
-  // ---- Sizing ----
-  let W = 480, H = 640;
-  function resize() {
-    const maxW = Math.min(window.innerWidth - 20, 520);
-    const maxH = Math.min(window.innerHeight - 130, 720);
-    const aspect = 3 / 4;
-    W = Math.floor(Math.min(maxW, maxH * aspect));
-    H = Math.floor(W / aspect);
-    W = Math.max(W, 300);
-    H = Math.max(H, 400);
-    canvas.width = W;
-    canvas.height = H;
+  // ---- Sizing (fixed 900x700 design area, letterboxed, DPR-aware) ----
+  const DW = 900, DH = 700;
+  let scale = 1;
+  function fitCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const availW = window.innerWidth - 40;
+    const availH = window.innerHeight - 130;
+    scale = Math.max(0.4, Math.min(1.4, Math.min(availW / DW, availH / DH)));
+    canvas.width = Math.round(DW * scale * dpr);
+    canvas.height = Math.round(DH * scale * dpr);
+    canvas.style.width = Math.round(DW * scale) + 'px';
+    canvas.style.height = Math.round(DH * scale) + 'px';
+    ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
   }
-  resize();
-  window.addEventListener('resize', resize);
+  fitCanvas();
+  window.addEventListener('resize', fitCanvas);
 
   // ---- State ----
-  const STATE = { READY: 0, PLAYING: 1, DEAD: 2 };
+  const STATE = { READY: 0, PLAYING: 1, DEAD: 2, PAUSED: 3 };
   let state = STATE.READY;
   let score = 0;
   let best = parseInt(localStorage.getItem('cavediver_best') || '0', 10);
@@ -119,14 +136,41 @@
   // Particles
   let particles = [];
 
+  // ---- WebAudio (no files) ----
+  let audioCtx = null;
+  function ensureAudio() {
+    if (!audioCtx) {
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audioCtx = null; }
+    }
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  }
+  function beep(freq, dur, type, vol, when) {
+    if (!audioCtx) return;
+    try {
+      const t0 = audioCtx.currentTime + (when || 0);
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type || 'square';
+      o.frequency.setValueAtTime(freq, t0);
+      g.gain.setValueAtTime(vol || 0.08, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t0); o.stop(t0 + dur + 0.02);
+    } catch (e) {}
+  }
+  const sfxScore = () => beep(660, 0.08, 'square', 0.06);
+  const sfxThrust = () => beep(220, 0.05, 'sawtooth', 0.03);
+  const sfxDeath = () => { beep(180, 0.25, 'sawtooth', 0.1); beep(90, 0.4, 'square', 0.08, 0.05); };
+  const sfxStart = () => { beep(440, 0.08, 'square', 0.06); beep(660, 0.1, 'square', 0.06, 0.09); };
+
   // Background stars (parallax)
   let stars = [];
   function initStars() {
     stars = [];
     for (let i = 0; i < 60; i++) {
       stars.push({
-        x: Math.random() * W,
-        y: Math.random() * H,
+        x: Math.random() * DW,
+        y: Math.random() * DH,
         s: Math.random() * 1.5 + 0.5,
         sp: Math.random() * 0.3 + 0.1
       });
@@ -143,7 +187,7 @@
     const gap = gapFor(colIndex);
     const margin = 20;
     const minY = margin + gap / 2;
-    const maxY = H - margin - gap / 2;
+    const maxY = DH - margin - gap / 2;
     const cy = minY + Math.random() * (maxY - minY);
     return {
       x: x,
@@ -154,8 +198,8 @@
   }
 
   function resetGame() {
-    player.x = W * 0.25;
-    player.y = H / 2;
+    player.x = DW * 0.25;
+    player.y = DH / 2;
     player.vy = 0;
     player.thrust = false;
     player.trail = [];
@@ -165,12 +209,12 @@
     scoreEl.textContent = '0';
     scrollSpeed = 2.2;
     frame = 0;
-    nextColX = W + COL_W;
+    nextColX = DW + COL_W;
     // Pre-fill columns
-    for (let i = 0; i < Math.ceil(W / COL_W) + 6; i++) {
-      cols.push(makeCol(W + COL_W * i, i));
+    for (let i = 0; i < Math.ceil(DW / COL_W) + 6; i++) {
+      cols.push(makeCol(DW + COL_W * i, i));
     }
-    nextColX = W + COL_W * (Math.ceil(W / COL_W) + 6);
+    nextColX = DW + COL_W * (Math.ceil(DW / COL_W) + 6);
   }
   resetGame();
 
@@ -212,29 +256,41 @@
   }
 
   // ---- Input ----
+  function startGame() {
+    ensureAudio();
+    resetGame();
+    state = STATE.PLAYING;
+    sfxStart();
+  }
+
   function thrust() {
-    if (state === STATE.READY) {
-      state = STATE.PLAYING;
-    }
+    if (state === STATE.READY) { startGame(); return; }
+    if (state === STATE.PAUSED) { state = STATE.PLAYING; return; }
     if (state === STATE.PLAYING) {
       player.vy = -4.2;
       player.thrust = true;
       spawnParticles(player.x - 6, player.y + 4, 3, '#58a6ff', 6, 15);
+      sfxThrust();
     }
-    if (state === STATE.DEAD) {
-      resetGame();
-      state = STATE.READY;
-    }
+    if (state === STATE.DEAD) { startGame(); }
   }
 
   function releaseThrust() {
     player.thrust = false;
   }
 
+  function togglePause() {
+    if (state === STATE.PLAYING) state = STATE.PAUSED;
+    else if (state === STATE.PAUSED) state = STATE.PLAYING;
+  }
+
   window.addEventListener('keydown', e => {
     if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
       e.preventDefault();
       thrust();
+    } else if (e.code === 'KeyP' || e.code === 'Escape') {
+      e.preventDefault();
+      togglePause();
     }
   });
   window.addEventListener('keyup', e => {
@@ -245,12 +301,22 @@
   canvas.addEventListener('pointerdown', e => { e.preventDefault(); thrust(); });
   canvas.addEventListener('pointerup', e => { e.preventDefault(); releaseThrust(); });
   canvas.addEventListener('pointercancel', releaseThrust);
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+  // Big Play button (start screen)
+  const playBtn = document.getElementById('playBtn');
+  playBtn.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); startGame(); });
+
+  // Auto-pause when tab hidden
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && state === STATE.PLAYING) state = STATE.PAUSED;
+  });
 
   // ---- Collision ----
   function checkCollision() {
     const px = player.x, py = player.y, pr = player.r;
     // Ceiling / floor
-    if (py - pr < 0 || py + pr > H) return true;
+    if (py - pr < 0 || py + pr > DH) return true;
     // Columns
     for (const c of cols) {
       if (c.x + COL_W < px - pr || c.x > px + pr) continue;
@@ -263,11 +329,11 @@
   function update() {
     if (state === STATE.READY) {
       // Idle bob
-      player.y = H / 2 + Math.sin(frame * 0.05) * 12;
+      player.y = DH / 2 + Math.sin(frame * 0.05) * 12;
       frame++;
       return;
     }
-    if (state === STATE.DEAD) {
+    if (state === STATE.DEAD || state === STATE.PAUSED) {
       updateParticles();
       return;
     }
@@ -294,9 +360,9 @@
 
     // Remove off-screen cols, add new
     while (cols.length && cols[0].x + COL_W < -10) cols.shift();
-    while (nextColX - scrollSpeed * frame < W + COL_W * 2) {
+    while (nextColX - scrollSpeed * frame < DW + COL_W * 2) {
       // Add new column at the right edge
-      const lastX = cols.length ? cols[cols.length - 1].x + COL_W : W;
+      const lastX = cols.length ? cols[cols.length - 1].x + COL_W : DW;
       cols.push(makeCol(lastX, cols.length));
     }
 
@@ -307,6 +373,7 @@
         score++;
         scoreEl.textContent = score;
         spawnParticles(player.x, player.y, 2, '#3fb950', 10, 12);
+        sfxScore();
       }
     }
 
@@ -316,7 +383,7 @@
     // Stars
     for (const s of stars) {
       s.x -= s.sp * scrollSpeed * 0.3;
-      if (s.x < 0) { s.x = W; s.y = Math.random() * H; }
+      if (s.x < 0) { s.x = DW; s.y = Math.random() * DH; }
     }
 
     // Collision
@@ -329,6 +396,7 @@
       }
       spawnParticles(player.x, player.y, 30, '#f85149', 20, 30);
       spawnParticles(player.x, player.y, 20, '#58a6ff', 15, 25);
+      sfxDeath();
     }
   }
 
@@ -337,19 +405,19 @@
     // Top rock
     ctx.fillStyle = '#1a2332';
     for (const c of cols) {
-      if (c.x > W + COL_W) continue;
+      if (c.x > DW + COL_W) continue;
       const x = Math.floor(c.x);
       const w = COL_W;
       // Top
       ctx.fillRect(x, 0, w, Math.max(0, c.top));
       // Bottom
-      ctx.fillRect(x, c.bot, w, Math.max(0, H - c.bot));
+      ctx.fillRect(x, c.bot, w, Math.max(0, DH - c.bot));
     }
 
     // Rock edge highlights
     ctx.fillStyle = '#2d4a6a';
     for (const c of cols) {
-      if (c.x > W + COL_W) continue;
+      if (c.x > DW + COL_W) continue;
       const x = Math.floor(c.x);
       // Top edge
       if (c.top > 0) {
@@ -362,7 +430,7 @@
     // Rock texture (subtle pixel noise)
     ctx.fillStyle = '#141c28';
     for (const c of cols) {
-      if (c.x > W + COL_W) continue;
+      if (c.x > DW + COL_W) continue;
       const x = Math.floor(c.x);
       // Top texture
       for (let ty = 0; ty < c.top; ty += 8) {
@@ -371,7 +439,7 @@
         }
       }
       // Bottom texture
-      for (let by = c.bot; by < H; by += 8) {
+      for (let by = c.bot; by < DH; by += 8) {
         if ((Math.floor(x / 4) + Math.floor(by / 8)) % 3 === 0) {
           ctx.fillRect(x + 2, by + 2, 4, 4);
         }
@@ -433,43 +501,63 @@
   }
 
   function drawOverlay() {
+    const cx = DW / 2;
     if (state === STATE.READY) {
       ctx.fillStyle = 'rgba(13, 17, 23, 0.6)';
-      ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = '#c9d1d9';
-      ctx.font = 'bold 28px "Segoe UI", system-ui, sans-serif';
+      ctx.fillRect(0, 0, DW, DH);
       ctx.textAlign = 'center';
-      ctx.fillText('CAVE DIVER', W / 2, H / 2 - 40);
-      ctx.font = '15px "Segoe UI", system-ui, sans-serif';
+      ctx.fillStyle = '#c9d1d9';
+      ctx.font = 'bold 44px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('CAVE DIVER', cx, DH / 2 - 90);
+      ctx.font = '18px "Segoe UI", system-ui, sans-serif';
       ctx.fillStyle = '#8b949e';
-      ctx.fillText('Tap / Space / Click to thrust', W / 2, H / 2);
-      ctx.fillText('Navigate through the cave gaps', W / 2, H / 2 + 24);
+      ctx.fillText('Hold to thrust — thread the cave gaps', cx, DH / 2 - 40);
+      ctx.font = '14px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('Space / W / Tap to thrust   ·   P to pause', cx, DH / 2 - 12);
       ctx.fillStyle = '#58a6ff';
       ctx.font = '13px "Segoe UI", system-ui, sans-serif';
-      ctx.fillText('— LaunchTower —', W / 2, H / 2 + 60);
+      ctx.fillText('— LaunchTower —', cx, DH / 2 + 120);
       ctx.textAlign = 'left';
+      playBtn.style.display = 'inline-block';
+    } else {
+      playBtn.style.display = 'none';
     }
     if (state === STATE.DEAD) {
       ctx.fillStyle = 'rgba(13, 17, 23, 0.7)';
-      ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = '#f85149';
-      ctx.font = 'bold 32px "Segoe UI", system-ui, sans-serif';
+      ctx.fillRect(0, 0, DW, DH);
       ctx.textAlign = 'center';
-      ctx.fillText('CAVE OUT', W / 2, H / 2 - 50);
+      ctx.fillStyle = '#f85149';
+      ctx.font = 'bold 46px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('CAVE OUT', cx, DH / 2 - 80);
       ctx.fillStyle = '#c9d1d9';
-      ctx.font = '20px "Segoe UI", system-ui, sans-serif';
-      ctx.fillText('Score: ' + score, W / 2, H / 2 - 10);
+      ctx.font = 'bold 30px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('SCORE  ' + score, cx, DH / 2 - 20);
+      ctx.font = '18px "Segoe UI", system-ui, sans-serif';
+      ctx.fillStyle = '#8b949e';
+      ctx.fillText('BEST  ' + best, cx, DH / 2 + 16);
       if (score >= best && score > 0) {
         ctx.fillStyle = '#3fb950';
-        ctx.font = 'bold 16px "Segoe UI", system-ui, sans-serif';
-        ctx.fillText('NEW BEST!', W / 2, H / 2 + 18);
+        ctx.font = 'bold 20px "Segoe UI", system-ui, sans-serif';
+        ctx.fillText('NEW BEST!', cx, DH / 2 + 56);
       }
       ctx.fillStyle = '#8b949e';
-      ctx.font = '14px "Segoe UI", system-ui, sans-serif';
-      ctx.fillText('Tap / Space to retry', W / 2, H / 2 + 50);
+      ctx.font = '15px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('Tap / Space to retry', cx, DH / 2 + 100);
       ctx.fillStyle = '#58a6ff';
       ctx.font = '12px "Segoe UI", system-ui, sans-serif';
-      ctx.fillText('— LaunchTower —', W / 2, H / 2 + 80);
+      ctx.fillText('— LaunchTower —', cx, DH / 2 + 130);
+      ctx.textAlign = 'left';
+    }
+    if (state === STATE.PAUSED) {
+      ctx.fillStyle = 'rgba(13, 17, 23, 0.7)';
+      ctx.fillRect(0, 0, DW, DH);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#c9d1d9';
+      ctx.font = 'bold 40px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('PAUSED', cx, DH / 2 - 20);
+      ctx.fillStyle = '#8b949e';
+      ctx.font = '16px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('Press P / Esc or tap to resume', cx, DH / 2 + 24);
       ctx.textAlign = 'left';
     }
   }
@@ -477,7 +565,7 @@
   // ---- Main loop ----
   function loop() {
     update();
-    ctx.clearRect(0, 0, W, H);
+    ctx.clearRect(0, 0, DW, DH);
     drawStars();
     drawCave();
     drawParticles();
