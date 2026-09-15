@@ -263,6 +263,7 @@
     sfxStart();
   }
 
+  let deadAt = 0;
   function thrust() {
     if (state === STATE.READY) { startGame(); return; }
     if (state === STATE.PAUSED) { state = STATE.PLAYING; return; }
@@ -272,7 +273,7 @@
       spawnParticles(player.x - 6, player.y + 4, 3, '#58a6ff', 6, 15);
       sfxThrust();
     }
-    if (state === STATE.DEAD) { startGame(); }
+    if (state === STATE.DEAD && performance.now() - deadAt > 600) startGame();
   }
 
   function releaseThrust() {
@@ -302,10 +303,14 @@
   canvas.addEventListener('pointerup', e => { e.preventDefault(); releaseThrust(); });
   canvas.addEventListener('pointercancel', releaseThrust);
   canvas.addEventListener('contextmenu', e => e.preventDefault());
+  window.addEventListener('blur', () => {
+    if (state === STATE.PLAYING) state = STATE.PAUSED;
+    releaseThrust();
+  });
 
   // Big Play button (start screen)
   const playBtn = document.getElementById('playBtn');
-  playBtn.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); startGame(); });
+  if (playBtn) playBtn.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); startGame(); });
 
   // Auto-pause when tab hidden
   document.addEventListener('visibilitychange', () => {
@@ -389,6 +394,7 @@
     // Collision
     if (checkCollision()) {
       state = STATE.DEAD;
+      deadAt = performance.now();
       if (score > best) {
         best = score;
         bestEl.textContent = best;
@@ -518,9 +524,9 @@
       ctx.font = '13px "Segoe UI", system-ui, sans-serif';
       ctx.fillText('— LaunchTower —', cx, DH / 2 + 120);
       ctx.textAlign = 'left';
-      playBtn.style.display = 'inline-block';
+      if (playBtn) playBtn.style.display = 'inline-block';
     } else {
-      playBtn.style.display = 'none';
+      if (playBtn) playBtn.style.display = 'none';
     }
     if (state === STATE.DEAD) {
       ctx.fillStyle = 'rgba(13, 17, 23, 0.7)';
